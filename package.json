@@ -4,6 +4,7 @@
   "description": "Modern MongoDB Datasource Plugin for Grafana 11 & 12 (MongoDB 6/7/8)",
   "scripts": {
     "backend": "go vet ./pkg/... && mage -v",
+    "prebuild": "node -e \"const fs=require('fs');if(!fs.existsSync('node_modules/ajv-keywords/node_modules/ajv')&&fs.existsSync('node_modules/schema-utils/node_modules/ajv')){fs.cpSync('node_modules/schema-utils/node_modules/ajv','node_modules/ajv-keywords/node_modules/ajv',{recursive:true})}\"",
     "build": "webpack -c ./.config/webpack/webpack.config.ts --env production",
     "clean": "rm -rf meln5674-mongodb-community dist/",
     "deps": "npm install --legacy-peer-deps && go mod download",
@@ -75,7 +76,10 @@
     "rxjs": "^7.8.1"
   },
   "overrides": {
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "ajv-keywords": {
+      "ajv": "^8.12.0"
+    }
   },
   "engines": {
     "node": ">=18"
