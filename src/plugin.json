@@ -5,16 +5,19 @@
   "id": "meln5674-mongodb-community",
   "metrics": true,
   "backend": true,
+  "annotations": true,
   "executable": "gpx_mongodb-community",
   "info": {
-    "description": "Community-supported MongoDB Datasource Plugin",
+    "description": "Modern MongoDB Datasource Plugin for Grafana 11 & 12 (MongoDB 6/7/8)",
     "author": {
-      "name": "Andrew Melnick",
-      "url": "https://github.com/meln5674"
+      "name": "Gustavo Martins (Fork of Andrew Melnick)",
+      "url": "https://github.com/GustavoMS0"
     },
     "keywords": [
       "mongodb",
-      "nosql"
+      "nosql",
+      "timeseries",
+      "aggregation"
     ],
     "logos": {
       "small": "img/logo.svg",
@@ -23,11 +26,11 @@
     "links": [
       {
         "name": "Website",
-        "url": "https://github.com/meln5674/grafana-mongodb-community-plugin"
+        "url": "https://github.com/GustavoMS0/grafana-mongodb-community-plugin"
       },
       {
         "name": "License",
-        "url": "https://github.com/meln5674/grafana/mongodb-community-plugin/blob/master/LICENSE"
+        "url": "https://github.com/GustavoMS0/grafana-mongodb-community-plugin/blob/main/LICENSE"
       }
     ],
     "screenshots": [],
@@ -35,7 +38,7 @@
     "updated": "%TODAY%"
   },
   "dependencies": {
-    "grafanaDependency": ">=9.0.0",
+    "grafanaDependency": ">=11.0.0",
     "plugins": []
   }
 }

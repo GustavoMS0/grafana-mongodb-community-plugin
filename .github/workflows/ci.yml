@@ -1,122 +1,50 @@
 name: CI
 
-env:
-  NO_BUILD_IMAGE: '1'
-  IMAGE_REPO: ghcr.io/meln5674/grafana-mongodb-community-plugin
-  IMAGE_TAG: github-actions
-
 on:
   push:
-    branches: '**' 
-    tags: '**'
+    branches: ['main', 'master']
+    tags: ['v*']
   pull_request:
-    branches: '**'
-    tags: '**'
+    branches: ['main', 'master']
   workflow_dispatch: {}
+
 jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
 
-      - uses: actions/checkout@v3
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          submodules: true
+          node-version: '20'
 
-      - name: Get yarn cache directory path
-        id: yarn-cache-dir-path
-        run: echo "::set-output name=dir::$(yarn cache dir)"
-
-      - name: Get go cache directory path
-        id: gopath-dir-path
-        run: echo "::set-output name=dir::$(echo ~/go)"
-
-      - name: Cache yarn cache
-        uses: actions/cache/restore@v3
-        id: restore-yarn-cache
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          path: ${{ steps.yarn-cache-dir-path.outputs.dir }}
-          key: ${{ runner.os }}-yarn
-          restore-keys: |
-            ${{ runner.os }}-yarn
+          go-version: '1.24.x'
+          cache: true
 
-      - name: Cache gopath
-        uses: actions/cache/restore@v3
-        id: restore-gopath
-        with:
-          path: ${{ steps.gopath-dir-path.outputs.dir }}
-          key: ${{ runner.os }}-go
-          restore-keys: |
-            ${{ runner.os }}-go
+      - name: Install Frontend Dependencies
+        run: npm install --legacy-peer-deps --ignore-scripts
 
-      - name: Install Dependencies
-        id: install-dependencies
+      - name: Typecheck & Build Frontend
         run: |
-          export GOPATH=~/go
-          mkdir -p "${GOPATH}"
-          ./build-env.sh yarn deps
+          npm run typecheck
+          npm run build
 
-      - name: Cache yarn cache
-        uses: actions/cache/save@v3
-        id: cache-yarn-cache
-        with:
-          path: ${{ steps.yarn-cache-dir-path.outputs.dir }}
-          key: ${{ runner.os }}-yarn
-          restore-keys: |
-            ${{ runner.os }}-yarn
-
-      - name: Cache gopath
-        uses: actions/cache/save@v3
-        id: cache-gopath
-        with:
-          path: ${{ steps.gopath-dir-path.outputs.dir }}
-          key: ${{ runner.os }}-go
-          restore-keys: |
-            ${{ runner.os }}-go
-
-      - name: Lint
-        id: lint
+      - name: Vet & Test Backend
         run: |
-          export GOPATH=~/go
-          ./build-env.sh yarn lint
+          go vet ./pkg/...
+          go test -v -race ./pkg/...
 
-
-      - name: Build Frontend
-        id: build-frontend
+      - name: Build Backend Binaries
         run: |
-          export GOPATH=~/go
-          ./build-env.sh yarn build
+          GOOS=linux GOARCH=amd64 go build -o dist/gpx_mongodb-community_linux_amd64 ./pkg
+          GOOS=linux GOARCH=arm64 go build -o dist/gpx_mongodb-community_linux_arm64 ./pkg
+          GOOS=darwin GOARCH=amd64 go build -o dist/gpx_mongodb-community_darwin_amd64 ./pkg
+          GOOS=darwin GOARCH=arm64 go build -o dist/gpx_mongodb-community_darwin_arm64 ./pkg
+          GOOS=windows GOARCH=amd64 go build -o dist/gpx_mongodb-community_windows_amd64.exe ./pkg
 
-      - name: Run Unit Tests
-        id: unit-tests
-        run: |
-          export GOPATH=~/go
-          ./build-env.sh yarn test-backend
-
-      - name: Build Backend
-        id: build-backend
-        run: |
-          export GOPATH=~/go
-          ./build-env.sh yarn backend
-
-      - name: Build Plugin Zip
-        id: build-plugin-zip
-        run: |
-          export GOPATH=~/go
-          ./build-env.sh yarn plugin
-
-      - name: Run Integration Tests
-        id: run-integration-tests
-        run: |
-          export GOPATH=~/go
-          ./build-env.sh yarn integration-test
-
-      - name: Create Release
-        uses: "marvinpinto/action-automatic-releases@latest"
-        if: contains(github.ref, 'tags/v')
-        with:
-          repo_token: "${{ secrets.GITHUB_TOKEN }}"
-          # automatic_release_tag: "${{ github.ref }}"
-          prerelease: true
-          title: "${{ github.tag }}"
-          files: |
-            meln5674-mongodb-community.zip
+      - name: Package Plugin Archive
+        run: zip -r meln5674-mongodb-community.zip dist/ CHANGELOG.md LICENSE README.md

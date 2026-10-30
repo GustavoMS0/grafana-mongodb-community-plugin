@@ -3,6 +3,7 @@ package plugin
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
@@ -52,6 +53,11 @@ func (s *schemaInferenceState) updateDoc(doc timestepDocument) error {
 	return s.nextDoc()
 }
 
+// UpdateDoc updates the schema inference state with a new document.
+func (s *schemaInferenceState) UpdateDoc(doc timestepDocument) error {
+	return s.updateDoc(doc)
+}
+
 func (s *schemaInferenceState) nextDoc() error {
 	mismatchOld := make(map[string]data.FieldType, len(s.typeGuesses))
 	mismatchNew := make(map[string]data.FieldType, len(s.typeGuesses))
@@ -60,7 +66,7 @@ func (s *schemaInferenceState) nextDoc() error {
 			// Any non-nullable guesses that aren't in the current row must be nullable
 			_, stillHere := s.currentRow[name]
 			if !stillHere && !guess.Nullable() {
-				log.DefaultLogger.Debug("New field discovered after first row, making type nullable", "name", name, "row", s.typeGuesses, "guesses", s.typeGuesses)
+				log.DefaultLogger.Debug("New field discovered after first row, making type nullable", "name", name)
 				s.typeGuesses[name] = guess.NullableType()
 			}
 		}
@@ -73,7 +79,7 @@ func (s *schemaInferenceState) nextDoc() error {
 		} else if s.afterFirst && !known && !currentType.Nullable() {
 			// If a new field is found after the first document,
 			// the old guess must be made nullable
-			log.DefaultLogger.Debug("Field missing after first row, making type nullable", "name", name, "row", s.typeGuesses, "guesses", s.typeGuesses)
+			log.DefaultLogger.Debug("Field missing after first row, making type nullable", "name", name)
 			s.typeGuesses[name] = currentType.NullableType()
 		} else if s.afterFirst && known && (currentType == guess || currentType.NullableType() == guess) {
 			// If the new guess and the old guess are the same modulo nullability,
@@ -87,17 +93,21 @@ func (s *schemaInferenceState) nextDoc() error {
 	}
 
 	if len(mismatchOld) != 0 {
+		mismatchedNames := make([]string, 0, len(mismatchOld))
+		for name := range mismatchOld {
+			mismatchedNames = append(mismatchedNames, name)
+		}
+		sort.Strings(mismatchedNames)
+
 		errMsg := strings.Builder{}
 		errMsg.WriteString("Field(s) appeared with different types. Please ensure value fields are the same type in each document: ")
-		first := false
-		for name, old := range mismatchOld {
-			new := mismatchNew[name]
-			if first {
-				errMsg.WriteString(",")
-			} else {
-				first = true
+		for i, name := range mismatchedNames {
+			old := mismatchOld[name]
+			newType := mismatchNew[name]
+			if i > 0 {
+				errMsg.WriteString(", ")
 			}
-			errMsg.WriteString(fmt.Sprintf("%s (%s vs %s)", name, old, new))
+			errMsg.WriteString(fmt.Sprintf("%s (%s vs %s)", name, old, newType))
 		}
 		return errors.New(errMsg.String())
 	}
@@ -108,9 +118,20 @@ func (s *schemaInferenceState) nextDoc() error {
 }
 
 func (s *schemaInferenceState) finish() []field {
-	fields := make([]field, 0, len(s.typeGuesses))
-	for name, guess := range s.typeGuesses {
-		fields = append(fields, field{Name: name, Type: guess})
+	names := make([]string, 0, len(s.typeGuesses))
+	for name := range s.typeGuesses {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	fields := make([]field, 0, len(names))
+	for _, name := range names {
+		fields = append(fields, field{Name: name, Type: s.typeGuesses[name]})
 	}
 	return fields
+}
+
+// Finish returns the deterministically ordered list of inferred fields.
+func (s *schemaInferenceState) Finish() []field {
+	return s.finish()
 }

@@ -1,198 +1,237 @@
 import { defaults, zip } from 'lodash';
-
 import React, { ChangeEvent, PureComponent, SyntheticEvent } from 'react';
-import { 
-  Input,
+import {
+  Alert,
+  Button,
+  CodeEditor,
   FieldSet,
   InlineField,
-  InlineFormLabel,
   InlineFieldRow,
+  InlineFormLabel,
   InlineSwitch,
-  CodeEditor,
+  Input,
   Select,
-  Button,
 } from '@grafana/ui';
 import { QueryEditorProps, SelectableValue } from '@grafana/data';
 import { DataSource } from './datasource';
-import { defaultQuery, MongoDBDataSourceOptions, MongoDBQuery, MongoDBQueryType } from './types';
+import {
+  defaultQuery,
+  MongoDBDataSourceOptions,
+  MongoDBQuery,
+  MongoDBQueryType,
+  validateAggregationPipelineJson,
+  VALUE_FIELD_TYPE_OPTIONS,
+} from './types';
 
 type Props = QueryEditorProps<DataSource, MongoDBQuery, MongoDBDataSourceOptions>;
 
-export class QueryEditor extends PureComponent<Props> {
-  readonly labelWidth = 25;
-  readonly longWidth = 50;
+interface State {
+  aggregationError: string | null;
+}
 
-  readonly queryTypeOptions = [
+export class QueryEditor extends PureComponent<Props, State> {
+  readonly labelWidth = 26;
+  readonly longWidth = 48;
+
+  readonly queryTypeOptions: Array<SelectableValue<MongoDBQueryType>> = [
     {
-        label: "Timeseries",
-        value: MongoDBQueryType.Timeseries,
-        description: "Return time-indexed series of values, distinguished by a set of labels"
+      label: 'Timeseries',
+      value: MongoDBQueryType.Timeseries,
+      description: 'Return time-indexed series of values, distinguished by a set of labels',
     },
     {
-        label: "Table",
-        value: MongoDBQueryType.Table,
-        description: "Return arbitrary rows for a table or further processing"
-    }
+      label: 'Table',
+      value: MongoDBQueryType.Table,
+      description: 'Return arbitrary rows for a table or further processing',
+    },
   ];
 
   readonly defaultQueryType: MongoDBQueryType = MongoDBQueryType.Timeseries;
 
+  constructor(props: Props) {
+    super(props);
+    const initialAggregation = props.query.aggregation ?? defaultQuery.aggregation ?? '[]';
+    this.state = {
+      aggregationError: validateAggregationPipelineJson(initialAggregation),
+    };
+  }
+
   onDatabaseChange = (event: ChangeEvent<HTMLInputElement>) => {
-    const { onChange, query } = this.props;
+    const { onChange, query, onRunQuery } = this.props;
     onChange({ ...query, database: event.target.value });
+    onRunQuery();
   };
 
   onCollectionChange = (event: ChangeEvent<HTMLInputElement>) => {
     const { onChange, query, onRunQuery } = this.props;
     onChange({ ...query, collection: event.target.value });
-    // executes the query
     onRunQuery();
   };
-  onQueryTypeChange = (
-        query: Props['query'],
-        onChange: Props['onChange'],
-        onRunQuery: Props['onRunQuery'],
-  ) => (newValue: SelectableValue) => {
-    onChange({ ...query, queryType: newValue.value });
-    onRunQuery();
-  };
+
+  onQueryTypeChange =
+    (query: Props['query'], onChange: Props['onChange'], onRunQuery: Props['onRunQuery']) =>
+    (newValue: SelectableValue<MongoDBQueryType>) => {
+      onChange({ ...query, queryType: newValue.value ?? this.defaultQueryType });
+      onRunQuery();
+    };
 
   onTimestampFieldChange = (event: ChangeEvent<HTMLInputElement>) => {
     const { onChange, query, onRunQuery } = this.props;
     onChange({ ...query, timestampField: event.target.value });
-    // executes the query
     onRunQuery();
   };
 
   onTimestampFormatChange = (event: ChangeEvent<HTMLInputElement>) => {
     const { onChange, query, onRunQuery } = this.props;
     onChange({ ...query, timestampFormat: event.target.value });
-    // executes the query
     onRunQuery();
   };
 
-  
   onLabelFieldChange = (index: number) => (event: ChangeEvent<HTMLInputElement>) => {
     const { onChange, query, onRunQuery } = this.props;
-    let newLabelFields = Array.from(query.labelFields)
+    const newLabelFields = Array.from(query.labelFields || []);
     newLabelFields.splice(index, 1, event.target.value);
     onChange({ ...query, labelFields: newLabelFields });
-    // executes the query
     onRunQuery();
   };
 
   onLabelFieldAppend = () => {
     const { onChange, query, onRunQuery } = this.props;
-    let newLabelFields = Array.from(query.labelFields)
-    newLabelFields.splice(query.labelFields.length, 0, "");
+    const currentLabels = query.labelFields || [];
+    const newLabelFields = [...currentLabels, ''];
     onChange({ ...query, labelFields: newLabelFields });
-    // executes the query
     onRunQuery();
   };
 
   onLabelFieldRemove = (index: number) => () => {
     const { onChange, query, onRunQuery } = this.props;
-    let newLabelFields = Array.from(query.labelFields)
+    const newLabelFields = Array.from(query.labelFields || []);
     newLabelFields.splice(index, 1);
     onChange({ ...query, labelFields: newLabelFields });
-    // executes the query
     onRunQuery();
   };
 
   onLegendFormatChange = (event: ChangeEvent<HTMLInputElement>) => {
     const { onChange, query, onRunQuery } = this.props;
     onChange({ ...query, legendFormat: event.target.value });
-    // executes the query
     onRunQuery();
   };
 
-  onSchemaInferenceChange = (event: ChangeEvent<HTMLInputElement>) => {
+  onSchemaInferenceChange = (event: SyntheticEvent<HTMLInputElement>) => {
     const { onChange, query, onRunQuery } = this.props;
-    onChange({ ...query, schemaInference: event.target.checked });
-    // executes the query
+    onChange({ ...query, schemaInference: event.currentTarget.checked });
     onRunQuery();
   };
+
   onSchemaInferenceDepthChange = (event: ChangeEvent<HTMLInputElement>) => {
     const { onChange, query, onRunQuery } = this.props;
-    onChange({ ...query, schemaInferenceDepth: parseInt(event.target.value, 10) });
-    // executes the query
+    const parsed = parseInt(event.target.value, 10);
+    onChange({ ...query, schemaInferenceDepth: Number.isNaN(parsed) || parsed < 1 ? 20 : parsed });
     onRunQuery();
   };
 
   onValueFieldChange = (index: number) => (event: ChangeEvent<HTMLInputElement>) => {
     const { onChange, query, onRunQuery } = this.props;
-    let newValueFields = Array.from(query.valueFields);
+    const newValueFields = Array.from(query.valueFields || []);
     newValueFields.splice(index, 1, event.target.value);
     onChange({ ...query, valueFields: newValueFields });
-    // executes the query
     onRunQuery();
   };
 
-  onValueFieldTypeChange = (index: number) => (event: ChangeEvent<HTMLInputElement>) => {
+  onValueFieldTypeSelectChange = (index: number) => (selected: SelectableValue<string>) => {
     const { onChange, query, onRunQuery } = this.props;
-    let newValueFieldTypes = Array.from(query.valueFieldTypes);
-    newValueFieldTypes.splice(index, 1, event.target.value);
+    const newValueFieldTypes = Array.from(query.valueFieldTypes || []);
+    newValueFieldTypes.splice(index, 1, selected?.value ?? 'float64');
     onChange({ ...query, valueFieldTypes: newValueFieldTypes });
-    // executes the query
     onRunQuery();
   };
 
   onValueFieldAppend = () => {
     const { onChange, query, onRunQuery } = this.props;
-    let newValueFields = Array.from(query.valueFields);
-    let newValueFieldTypes = Array.from(query.valueFieldTypes);
-    newValueFields.splice(query.valueFields.length, 0, "");
-    newValueFieldTypes.splice(query.valueFieldTypes.length, 0, "");
+    const newValueFields = [...(query.valueFields || []), ''];
+    const newValueFieldTypes = [...(query.valueFieldTypes || []), 'float64'];
     onChange({ ...query, valueFields: newValueFields, valueFieldTypes: newValueFieldTypes });
-    // executes the query
     onRunQuery();
   };
 
   onValueFieldRemove = (index: number) => () => {
     const { onChange, query, onRunQuery } = this.props;
-    let newValueFields = Array.from(query.valueFields);
-    let newValueFieldTypes = Array.from(query.valueFieldTypes);
+    const newValueFields = Array.from(query.valueFields || []);
+    const newValueFieldTypes = Array.from(query.valueFieldTypes || []);
     newValueFields.splice(index, 1);
     newValueFieldTypes.splice(index, 1);
     onChange({ ...query, valueFields: newValueFields, valueFieldTypes: newValueFieldTypes });
-    // executes the query
     onRunQuery();
   };
-
-
 
   onAutoTimeBoundChange = (event: SyntheticEvent<HTMLInputElement>) => {
     const { onChange, query, onRunQuery } = this.props;
     onChange({ ...query, autoTimeBound: event.currentTarget.checked });
-    // executes the query
     onRunQuery();
   };
 
   onAutoTimeBoundAtStartChange = (event: SyntheticEvent<HTMLInputElement>) => {
     const { onChange, query, onRunQuery } = this.props;
     onChange({ ...query, autoTimeBoundAtStart: event.currentTarget.checked });
-    // executes the query
     onRunQuery();
   };
 
   onAutoTimeSortChange = (event: SyntheticEvent<HTMLInputElement>) => {
     const { onChange, query, onRunQuery } = this.props;
     onChange({ ...query, autoTimeSort: event.currentTarget.checked });
-    // executes the query
+    onRunQuery();
+  };
+
+  onAllowDiskUseChange = (event: SyntheticEvent<HTMLInputElement>) => {
+    const { onChange, query, onRunQuery } = this.props;
+    onChange({ ...query, allowDiskUse: event.currentTarget.checked });
+    onRunQuery();
+  };
+
+  onMaxTimeMSChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const { onChange, query, onRunQuery } = this.props;
+    const parsed = parseInt(event.target.value, 10);
+    onChange({ ...query, maxTimeMS: Number.isNaN(parsed) || parsed < 0 ? 0 : parsed });
     onRunQuery();
   };
 
   onAggregationChange = (newAggregation: string) => {
     const { onChange, query, onRunQuery } = this.props;
+    const validationError = validateAggregationPipelineJson(newAggregation);
+    this.setState({ aggregationError: validationError });
     onChange({ ...query, aggregation: newAggregation });
-    // executes the query
-    onRunQuery();
+    if (!validationError) {
+      onRunQuery();
+    }
   };
 
+  onFormatAggregation = () => {
+    const { onChange, query } = this.props;
+    const current = query.aggregation || defaultQuery.aggregation || '[]';
+    try {
+      const parsed = JSON.parse(current);
+      const formatted = JSON.stringify(parsed, null, 2);
+      this.setState({ aggregationError: null });
+      onChange({ ...query, aggregation: formatted });
+    } catch (err) {
+      this.setState({ aggregationError: validateAggregationPipelineJson(current) });
+    }
+  };
+
+  resolveFieldTypeOption(currentType: string | undefined): SelectableValue<string> {
+    const normalized = currentType || 'float64';
+    const existing = VALUE_FIELD_TYPE_OPTIONS.find((opt) => opt.value === normalized);
+    if (existing) {
+      return existing;
+    }
+    return { label: normalized, value: normalized };
+  }
 
   render() {
     const query = defaults(this.props.query, defaultQuery);
-    const { onChange, onRunQuery } = this.props;
+    const { onChange, onRunQuery, datasource } = this.props;
+    const { aggregationError } = this.state;
+    const isTimeseries = (query.queryType || this.defaultQueryType) === MongoDBQueryType.Timeseries;
 
     return (
       <>
@@ -203,10 +242,10 @@ export class QueryEditor extends PureComponent<Props> {
                 width={this.longWidth}
                 name="database"
                 type="text"
-                placeholder="my_database"
+                placeholder={datasource?.defaultDatabase || 'my_database'}
                 value={query.database || ''}
                 onChange={this.onDatabaseChange}
-              ></Input>
+              />
             </InlineField>
             <InlineField label=".">
               <Input
@@ -216,194 +255,255 @@ export class QueryEditor extends PureComponent<Props> {
                 placeholder="my_collection"
                 value={query.collection || ''}
                 onChange={this.onCollectionChange}
-              ></Input>
+              />
             </InlineField>
           </InlineFieldRow>
-          <InlineField
-              labelWidth={this.labelWidth}
-              tooltip="Type of query to execute"
-              label="QueryType"
-              >
-            <Select
-              options={this.queryTypeOptions}
-              value={this.queryTypeOptions.find((queryType) => queryType.value === query.queryType) ?? this.queryTypeOptions[0]}
-              onChange={this.onQueryTypeChange(query, onChange, onRunQuery)}
-                width={this.longWidth}
-            ></Select>
-          </InlineField>
 
-          { (query.queryType || this.defaultQueryType) === MongoDBQueryType.Timeseries ? (
+          <InlineFieldRow>
+            <InlineField labelWidth={this.labelWidth} tooltip="Type of query to execute" label="Query Type">
+              <Select
+                options={this.queryTypeOptions}
+                value={
+                  this.queryTypeOptions.find((queryType) => queryType.value === query.queryType) ??
+                  this.queryTypeOptions[0]
+                }
+                onChange={this.onQueryTypeChange(query, onChange, onRunQuery)}
+                width={this.longWidth}
+              />
+            </InlineField>
+          </InlineFieldRow>
+
+          {isTimeseries ? (
             <>
-              <InlineField
+              <InlineFieldRow>
+                <InlineField
                   labelWidth={this.labelWidth}
                   label="Timestamp Field"
                   tooltip="Field to expect in every document containing the timestamp"
-                  >
-                <Input
-                  width={this.longWidth}
-                  value={query.timestampField || ''}
-                  onChange={this.onTimestampFieldChange}
-                  type="text"
-                  placeholder="timestamp"
-                  name="timestampField"
-                ></Input>
-              </InlineField>
-              <InlineField
+                >
+                  <Input
+                    width={this.longWidth}
+                    value={query.timestampField || ''}
+                    onChange={this.onTimestampFieldChange}
+                    type="text"
+                    placeholder="timestamp"
+                    name="timestampField"
+                  />
+                </InlineField>
+              </InlineFieldRow>
+              <InlineFieldRow>
+                <InlineField
                   labelWidth={this.labelWidth}
                   label="Timestamp Format"
-                  tooltip="If blank, assume timestamps are native BSON dates. Otherwise, parse the timestamp as a string in the format described here: https://pkg.go.dev/time#Parse"
-                  >
-                <Input
-                  width={this.longWidth}
-                  value={query.timestampFormat || ''}
-                  onChange={this.onTimestampFormatChange}
-                  type="text"
-                  placeholder="<BSON $date>"
-                  name="timestampField"
-                ></Input>
-              </InlineField>
-              <InlineFormLabel
+                  tooltip="If blank, assume timestamps are native BSON dates. Otherwise, parse the timestamp as a string in the Go time.Parse layout"
+                >
+                  <Input
+                    width={this.longWidth}
+                    value={query.timestampFormat || ''}
+                    onChange={this.onTimestampFormatChange}
+                    type="text"
+                    placeholder="<BSON $date>"
+                    name="timestampFormat"
+                  />
+                </InlineField>
+              </InlineFieldRow>
+
+              <InlineFieldRow>
+                <InlineFormLabel
                   width={this.labelWidth}
                   tooltip="Each unique combination of these fields defines a separate time series. Nested fields are not supported, please project to a flat document"
-              >
-                Label Fields
-              </InlineFormLabel>
-              <div>
-                  {query.labelFields.map((field, index) => (
-                      <InlineFieldRow key={index}>
-                          <Input
-                            width={this.longWidth}
-                            onChange={this.onLabelFieldChange(index)}
-                            value={field}
-                            placeholder="name"
-                          ></Input>
-                          <Button onClick={this.onLabelFieldRemove(index)}>-</Button>
-                      </InlineFieldRow>
+                >
+                  Label Fields
+                </InlineFormLabel>
+                <div>
+                  {(query.labelFields || []).map((field, index) => (
+                    <InlineFieldRow key={index}>
+                      <Input
+                        width={this.longWidth}
+                        onChange={this.onLabelFieldChange(index)}
+                        value={field}
+                        placeholder="label_field"
+                      />
+                      <Button variant="secondary" onClick={this.onLabelFieldRemove(index)} type="button">
+                        -
+                      </Button>
+                    </InlineFieldRow>
                   ))}
-                  <Button onClick={this.onLabelFieldAppend}>+</Button>
-              </div>
-              <InlineField
-                    labelWidth={this.labelWidth}
-                    label="Legend Format"
-                    tooltip={"Series name override. Replacements are:\n{{.Value}}: Value field name.\n{{.Labels.field_name}}: Value of the label with name 'field_name'\n{{.Labels}}: key=value,... for all labels\nSee https://pkg.go.dev/text/template for full syntax.\nFunctions from https://masterminds.github.io/sprig/ are provided"}
-              >
-                <Input
-                  value={query.legendFormat || ""}
-                  onChange={this.onLegendFormatChange}
-                />
-              </InlineField>
-            </>
-          ) : false }
-          { (query.queryType || this.defaultQueryType) === MongoDBQueryType.Timeseries ? (
-            <>
-              <InlineField
+                  <Button variant="secondary" onClick={this.onLabelFieldAppend} type="button">
+                    + Add Label Field
+                  </Button>
+                </div>
+              </InlineFieldRow>
+
+              <InlineFieldRow>
+                <InlineField
+                  labelWidth={this.labelWidth}
+                  label="Legend Format"
+                  tooltip={
+                    "Series name override. Replacements are:\n{{.Value}}: Value field name.\n{{.Labels.field_name}}: Value of the label with name 'field_name'\n{{.Labels}}: key=value,... for all labels"
+                  }
+                >
+                  <Input
+                    width={this.longWidth}
+                    value={query.legendFormat || ''}
+                    onChange={this.onLegendFormatChange}
+                    placeholder="{{.Value}} {{.Labels}}"
+                  />
+                </InlineField>
+              </InlineFieldRow>
+
+              <InlineFieldRow>
+                <InlineField
                   label="Automatic Time-Bound"
                   labelWidth={this.labelWidth}
                   tooltip="Add a stage at the end of your pipeline to $match documents where Timestamp Field is within the current dashboard time range"
-                  >
-                <InlineSwitch
-                  value={query.autoTimeBound || false}
-                  onChange={this.onAutoTimeBoundChange}
-                ></InlineSwitch>
-              </InlineField>
-              { query.autoTimeBound ? (
-                <InlineField
+                >
+                  <InlineSwitch value={Boolean(query.autoTimeBound)} onChange={this.onAutoTimeBoundChange} />
+                </InlineField>
+                {query.autoTimeBound ? (
+                  <InlineField
                     label="Time-Bound at Start"
                     labelWidth={this.labelWidth}
-                    tooltip="Instead add the automatic time bound $match stage at the beginning of your pipeline. This only works if your timestamp field is present and correctly formatted in your collection, but can improve performance by not processing records outside of the current time range"
-                    >
-                  <InlineSwitch
-                    value={query.autoTimeBoundAtStart || false}
-                    onChange={this.onAutoTimeBoundAtStartChange}
-                  ></InlineSwitch>
-                </InlineField>     
-              ) : false }
-              <InlineField
+                    tooltip="Add the automatic time bound $match stage at the beginning of your pipeline to utilize collection indexes"
+                  >
+                    <InlineSwitch
+                      value={Boolean(query.autoTimeBoundAtStart)}
+                      onChange={this.onAutoTimeBoundAtStartChange}
+                    />
+                  </InlineField>
+                ) : null}
+                <InlineField
                   label="Automatic Time-Sort"
                   labelWidth={this.labelWidth}
                   tooltip="Add a stage at the end to $sort documents ascending by Timestamp Field"
-                  >
-                <InlineSwitch
-                  value={query.autoTimeSort || false}
-                  onChange={this.onAutoTimeSortChange}
-                ></InlineSwitch>
-              </InlineField>
+                >
+                  <InlineSwitch value={Boolean(query.autoTimeSort)} onChange={this.onAutoTimeSortChange} />
+                </InlineField>
+              </InlineFieldRow>
             </>
-          ) : false }
+          ) : null}
 
-          <div className="gf-form">
-            <InlineFormLabel
-              width={this.labelWidth}
-              tooltip="If enabled, Grafana will attempt to figure out the types of your data based on the first few documents. Otherwise, you will need to specify the names and datatypes of each field"
+          <InlineFieldRow>
+            <InlineField
+              label="Infer Schema"
+              labelWidth={this.labelWidth}
+              tooltip="If enabled, Grafana will infer field types from the first few documents returned by MongoDB"
             >
-              Infer Schema
-            </InlineFormLabel>
-            <InlineSwitch
-              value={query.schemaInference || false}
-              onChange={this.onSchemaInferenceChange}
-            />
-          </div>
-
-          { query.schemaInference ?
-            <>
+              <InlineSwitch value={Boolean(query.schemaInference)} onChange={this.onSchemaInferenceChange} />
+            </InlineField>
+            {query.schemaInference ? (
               <InlineField
-                    labelWidth={this.labelWidth}
-                    label="Schema Inference Depth"
-                    tooltip="How many documents to consider for inference before assuming no new fields will be present. If all documents have the same fields, you can set this to 1"
+                labelWidth={this.labelWidth}
+                label="Schema Inference Depth"
+                tooltip="Number of documents to inspect for schema inference"
               >
                 <Input
-                    value={`${query.schemaInferenceDepth}`}
-                    onChange={this.onSchemaInferenceDepthChange}
-                    type="number"
+                  width={16}
+                  value={`${query.schemaInferenceDepth ?? 20}`}
+                  onChange={this.onSchemaInferenceDepthChange}
+                  type="number"
+                  min={1}
                 />
               </InlineField>
-            </>
-            :
-            <>
+            ) : null}
+          </InlineFieldRow>
+
+          {!query.schemaInference ? (
+            <InlineFieldRow>
               <InlineFormLabel
                 width={this.labelWidth}
-                tooltip="These fields contain measurements or other recorded values. You must also specify the data types (float64, uint64, string, etc) for each field. Prefix with a star if a field may not appear in every document for a given series. See https://pkg.go.dev/github.com/grafana/grafana-plugin-sdk-go/data#FieldType for a list of valid types. Nested fields are not supported, please project to a flat document"
-              >Value Fields</InlineFormLabel>
-              {zip(query.valueFields, query.valueFieldTypes).map((field, index) => (
+                tooltip="Fields containing measurements or recorded values along with their data types. Prefix with * if a field is nullable."
+              >
+                Value Fields
+              </InlineFormLabel>
+              <div>
+                {zip(query.valueFields || [], query.valueFieldTypes || []).map(([fieldName, fieldType], index) => (
                   <InlineFieldRow key={index}>
-                      <Input
-                        onChange={this.onValueFieldChange(index)}
-                        width={this.longWidth}
-                        value={field[0]}
-                        placeholder="name"
-                      ></Input>
-                      <InlineField label=":">
-                          <Input
-                            onChange={this.onValueFieldTypeChange(index)}
-                            width={this.longWidth}
-                            value={field[1]}
-                            placeholder="type"
-                          ></Input>
-                      </InlineField>
-                      <Button onClick={this.onValueFieldRemove(index)}>-</Button>
+                    <Input
+                      onChange={this.onValueFieldChange(index)}
+                      width={36}
+                      value={fieldName || ''}
+                      placeholder="field_name"
+                    />
+                    <InlineField label=":">
+                      <Select
+                        width={36}
+                        options={VALUE_FIELD_TYPE_OPTIONS}
+                        value={this.resolveFieldTypeOption(fieldType)}
+                        allowCustomValue={true}
+                        onCreateOption={(customValue) => {
+                          this.onValueFieldTypeSelectChange(index)({
+                            label: customValue,
+                            value: customValue,
+                          });
+                        }}
+                        onChange={this.onValueFieldTypeSelectChange(index)}
+                      />
+                    </InlineField>
+                    <Button variant="secondary" onClick={this.onValueFieldRemove(index)} type="button">
+                      -
+                    </Button>
                   </InlineFieldRow>
-              ))}
-              <Button onClick={this.onValueFieldAppend}>+</Button>
-            </>
-          }
+                ))}
+                <Button variant="secondary" onClick={this.onValueFieldAppend} type="button">
+                  + Add Value Field
+                </Button>
+              </div>
+            </InlineFieldRow>
+          ) : null}
 
+          <InlineFieldRow>
+            <InlineField
+              label="Allow Disk Use"
+              labelWidth={this.labelWidth}
+              tooltip="Enable allowDiskUse on the MongoDB aggregation cursor for large pipelines exceeding memory limits (MongoDB 6/7/8)"
+            >
+              <InlineSwitch value={Boolean(query.allowDiskUse)} onChange={this.onAllowDiskUseChange} />
+            </InlineField>
+            <InlineField
+              label="Max Time (ms)"
+              labelWidth={20}
+              tooltip="Maximum execution time in milliseconds on the MongoDB server (0 = no server-side limit)"
+            >
+              <Input
+                width={20}
+                type="number"
+                min={0}
+                placeholder="0"
+                value={query.maxTimeMS ?? 0}
+                onChange={this.onMaxTimeMSChange}
+              />
+            </InlineField>
+          </InlineFieldRow>
         </FieldSet>
-        <InlineFormLabel
-          width={this.labelWidth}
-          tooltip="Argument to db.collection.aggregate(...), a JSON array of pipeline stage objects. Helper functions like new Date() or ObjectId() are not supported, consult the MongoDB manual at https://www.mongodb.com/docs/manual/reference/mongodb-extended-json/ to see how to represent these functions in pure JSON"
-        >
-          Aggregation
-        </InlineFormLabel>
-        <div 
-          style={{ resize: "vertical" }}
-        >
+
+        <InlineFieldRow>
+          <InlineFormLabel
+            width={this.labelWidth}
+            tooltip="Argument to db.collection.aggregate(...), a JSON array of pipeline stage objects. Use MongoDB Extended JSON ($date, $oid) for BSON types."
+          >
+            Aggregation Pipeline
+          </InlineFormLabel>
+          <Button variant="secondary" size="sm" onClick={this.onFormatAggregation} type="button">
+            Format JSON
+          </Button>
+        </InlineFieldRow>
+
+        {aggregationError ? (
+          <Alert title="Invalid Aggregation Pipeline JSON" severity="error">
+            {aggregationError}
+          </Alert>
+        ) : null}
+
+        <div style={{ resize: 'vertical' }}>
           <CodeEditor
             height="300px"
             showLineNumbers={true}
             language="json"
             value={query.aggregation || ''}
             onBlur={this.onAggregationChange}
-          ></CodeEditor>
+            onSave={this.onAggregationChange}
+          />
         </div>
       </>
     );

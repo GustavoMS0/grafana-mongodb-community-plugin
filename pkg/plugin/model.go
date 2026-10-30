@@ -38,16 +38,18 @@ type QueryModel struct {
 	Aggregation          string    `json:"aggregation"`
 	SchemaInference      bool      `json:"schemaInference"`
 	SchemaInferenceDepth int       `json:"schemaInferenceDepth,omitempty"`
+	AllowDiskUse         bool      `json:"allowDiskUse,omitempty"`
+	MaxTimeMS            int64     `json:"maxTimeMS,omitempty"`
 }
 
 func (m *QueryModel) resolve(fields []field) (resolvedQueryModel, error) {
 	var err error
 
-	queryType := m.QueryType
-	if queryType == "" {
-		queryType = defaultQueryType
+	qType := m.QueryType
+	if qType == "" {
+		qType = defaultQueryType
 	}
-	switch queryType {
+	switch qType {
 	case queryTypeTable:
 		return &tableQueryModel{
 			fields: fields,
@@ -171,25 +173,22 @@ func (m *timeseriesQueryModel) makeFrame(id string, labels data.Labels) (*data.F
 }
 
 func (m *timeseriesQueryModel) getLabels(doc timestepDocument) (data.Labels, string) {
-	// TODO: Might not work, need to find a fast but stable way to identify a set of labels
-	// labelsID := fmt.Sprintf("%#v", map[string]string(labels))
-
 	labels := make(data.Labels, len(m.labelFieldNames))
-
 	labelsID := strings.Builder{}
 
-	for ix, key := range m.labelFieldNames {
+	first := true
+	for _, key := range m.labelFieldNames {
 		value, ok := doc[key]
 		if !ok {
 			continue
 		}
 		labels[key] = fmt.Sprintf("%v", value)
 
-		if ix != 0 {
+		if !first {
 			labelsID.WriteString(",")
 		}
+		first = false
 		labelsID.WriteString(fmt.Sprintf("%s=%v", key, value))
-
 	}
 
 	return labels, labelsID.String()
@@ -213,12 +212,22 @@ func (m *timeseriesQueryModel) getDisplayName(valueField string, labels data.Lab
 
 func (m *timeseriesQueryModel) convertTimestamp(timestamp interface{}) (time.Time, error) {
 	if m.timestampFieldFormat == "" {
-		primTimestamp, isPrim := timestamp.(bsonPrim.DateTime)
-		if !isPrim {
+		switch ts := timestamp.(type) {
+		case bsonPrim.DateTime:
+			return ts.Time(), nil
+		case time.Time:
+			return ts, nil
+		case bsonPrim.Timestamp:
+			return time.Unix(int64(ts.T), 0), nil
+		case int64:
+			if ts > 100000000000 {
+				return time.UnixMilli(ts), nil
+			}
+			return time.Unix(ts, 0), nil
+		case int32:
+			return time.Unix(int64(ts), 0), nil
+		default:
 			return time.Time{}, fmt.Errorf("Timestamps must be bson DateTimes")
-		}
-		if isPrim {
-			return primTimestamp.Time(), nil
 		}
 	}
 	stringTimestamp, isString := timestamp.(string)
@@ -249,7 +258,6 @@ func (m *timeseriesQueryModel) getValues(doc timestepDocument) ([]interface{}, e
 	var actualType data.FieldType
 	for ix, field := range m.fields {
 		name := field.Name
-		value := doc[name]
 		type_ := field.Type
 		value, ok := doc[name]
 		if !ok || value == nil {
@@ -264,7 +272,7 @@ func (m *timeseriesQueryModel) getValues(doc timestepDocument) ([]interface{}, e
 		if err != nil {
 			return nil, errors.Wrap(err, fmt.Sprintf("Failed to convert value for %s (%#v)", name, value))
 		}
-		if actualType != type_ {
+		if valueValues[ix] != nil && actualType != type_ {
 			return nil, fmt.Errorf("Type mismatch for field %s: expected %s, got %s (%#v, %#v)", name, type_, actualType, value, valueValues[ix])
 		}
 	}
@@ -272,12 +280,17 @@ func (m *timeseriesQueryModel) getValues(doc timestepDocument) ([]interface{}, e
 	return values, nil
 }
 
+// GetFields validates and resolves the configured ValueFields and ValueFieldTypes.
+func (m *QueryModel) GetFields() ([]field, error) {
+	return m.getFields()
+}
+
 func (m *QueryModel) getFields() ([]field, error) {
-	if len(m.ValueFields) != len(m.ValueFields) {
+	if len(m.ValueFields) != len(m.ValueFieldTypes) {
 		return nil, fmt.Errorf(
 			"Value Fields and Value Field Types must be the same length (%d vs %d)",
 			len(m.ValueFields),
-			len(m.ValueFields),
+			len(m.ValueFieldTypes),
 		)
 	}
 	fields := make([]field, len(m.ValueFields))
@@ -354,6 +367,13 @@ func (m *QueryModel) getPipeline(from time.Time, to time.Time) (mongo.Pipeline, 
 	err := bson.UnmarshalExtJSON([]byte(m.Aggregation), false, &userPipeline)
 	if err != nil {
 		return mongo.Pipeline{}, errors.Wrap(err, "Failed to parse aggregation pipeline")
+	}
+	for _, stage := range userPipeline {
+		for _, elem := range stage {
+			if elem.Key == "$out" || elem.Key == "$merge" {
+				return mongo.Pipeline{}, fmt.Errorf("write stage %q is not permitted in read-only Grafana queries", elem.Key)
+			}
+		}
 	}
 	pipeline = append(pipeline, userPipeline...)
 

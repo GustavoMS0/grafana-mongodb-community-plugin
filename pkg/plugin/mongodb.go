@@ -4,16 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 	"github.com/pkg/errors"
 
-	"go.mongodb.org/mongo-driver/mongo"
 	mongoOpts "go.mongodb.org/mongo-driver/mongo/options"
+)
+
+const (
+	defaultSchemaInferenceDepth = 20
+	maxSchemaInferenceDepth     = 1000
+	defaultQueryTimeout         = 60 * time.Second
+	maxDocumentsPerQuery        = 100000
 )
 
 // MongoDBDateSpecifierReplacements is a mapping from date specifiers used by
@@ -69,9 +76,10 @@ func ConvertGoTimeFormatToMongo(goFormat string) (mongoFormat string, err error)
 			ix += len(repl.from)
 			if repl.to == nil {
 				unsupported = append(unsupported, repl.from)
-				continue
+			} else {
+				mongoFormatBuilder.WriteString(*repl.to)
 			}
-			mongoFormatBuilder.WriteString(*repl.to)
+			break
 		}
 		if found {
 			continue
@@ -81,81 +89,25 @@ func ConvertGoTimeFormatToMongo(goFormat string) (mongoFormat string, err error)
 	}
 
 	if len(unsupported) != 0 {
-		errMsg := strings.Builder{}
-		errMsg.WriteString("MongoDB does not have an equivalent for the following date specifiers: ")
-		first := false
-		for _, spec := range unsupported {
-			if first {
-				first = false
-			} else {
-				errMsg.WriteString(", ")
-			}
-			errMsg.WriteString(spec)
-		}
-		err = fmt.Errorf(errMsg.String())
+		err = fmt.Errorf(
+			"MongoDB does not have an equivalent for the following date specifiers: %s",
+			strings.Join(unsupported, ", "),
+		)
+		return "", err
 	}
 	return mongoFormatBuilder.String(), nil
 }
 
-func connect(ctx context.Context, pCtx backend.PluginContext) (client *mongo.Client, err error, internalErr error) {
-	data := datasource{}
-	err = json.Unmarshal([]byte(pCtx.DataSourceInstanceSettings.JSONData), &data.jsonData)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "Failed to parse data source settings")
-	}
-	secureJsonData, err := json.Marshal(pCtx.DataSourceInstanceSettings.DecryptedSecureJSONData)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "Failed to remarshal secure data source settings")
-	}
-	err = json.Unmarshal(secureJsonData, &data.secureJsonData)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "Failed to parse data source settings")
-	}
-	opts := mongoOpts.Client()
-
-	mongoURL, err := url.Parse(data.URL)
-	if err != nil {
-		return nil, errors.Wrap(err, fmt.Sprintf("Invalid Datasource URL %s", data.URL)), nil
-	}
-
-	err = data.applyAuth(mongoURL)
-	if err != nil {
-		return nil, err, nil
-	}
-	opts = opts.ApplyURI(mongoURL.String())
-
-	tlsConfig, err := data.getTLS()
-	if err != nil {
-		return nil, err, nil
-	}
-	if tlsConfig != nil {
-		opts.SetTLSConfig(tlsConfig)
-	}
-	log.DefaultLogger.Debug("Connecting with options", "opts", opts)
-
-	mongoClient, err := mongo.Connect(ctx, opts)
-	if err != nil {
-		return nil, errors.Wrap(err, "Error while connecting to MongoDB"), nil
-	}
-
-	return mongoClient, nil, nil
-}
-
 func (d *MongoDBDatasource) query(ctx context.Context, pCtx backend.PluginContext, query backend.DataQuery) backend.DataResponse {
-	log.DefaultLogger.Info("query called", "context", pCtx, "query", query)
+	start := time.Now()
+	log.DefaultLogger.Debug("query called", "refId", query.RefID)
 	response := backend.DataResponse{}
 
-	// Unmarshal the JSON into our QueryModel and parse values into usable representations
 	var qm QueryModel
-
-	var err error
-	err = json.Unmarshal(query.JSON, &qm)
-	if err != nil {
+	if err := json.Unmarshal(query.JSON, &qm); err != nil {
 		response.Error = errors.Wrap(err, "Invalid query JSON")
 		return response
 	}
-
-	log.DefaultLogger.Debug("Query Model Parsed", "QueryModel", qm)
 
 	pipeline, err := qm.getPipeline(query.TimeRange.From, query.TimeRange.To)
 	if err != nil {
@@ -163,27 +115,63 @@ func (d *MongoDBDatasource) query(ctx context.Context, pCtx backend.PluginContex
 		return response
 	}
 
-	log.DefaultLogger.Debug("Effective pipeline", "pipeline", pipeline)
-
-	mongoClient, err, internalErr := connect(ctx, pCtx)
-	if internalErr != nil {
-		response.Error = errors.Wrap(internalErr, "Internal failure while connecting to mongo")
-		return response
-	}
+	mongoClient, cfg, err := d.getClient(ctx, pCtx.DataSourceInstanceSettings)
 	if err != nil {
 		response.Error = errors.Wrap(err, "Failed to connect to mongo")
 		return response
 	}
-	defer mongoClient.Disconnect(ctx)
 
-	collection := mongoClient.Database(qm.Database).Collection(qm.Collection)
+	dbName := strings.TrimSpace(qm.Database)
+	if dbName == "" && cfg != nil {
+		dbName = strings.TrimSpace(cfg.DefaultDatabase)
+	}
+	if dbName == "" {
+		response.Error = fmt.Errorf("database must be specified in the query or in the datasource defaultDatabase setting")
+		return response
+	}
 
-	log.DefaultLogger.Info("Querying MongoDB", "context", pCtx, "query", query, "pipeline", pipeline)
-	cursor, err := collection.Aggregate(ctx, pipeline)
+	collectionName := strings.TrimSpace(qm.Collection)
+	if collectionName == "" {
+		response.Error = fmt.Errorf("collection must be specified in the query")
+		return response
+	}
+
+	queryCtx := ctx
+	var cancel context.CancelFunc
+	if qm.MaxTimeMS > 0 {
+		queryCtx, cancel = context.WithTimeout(ctx, time.Duration(qm.MaxTimeMS)*time.Millisecond)
+		defer cancel()
+	} else if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		queryCtx, cancel = context.WithTimeout(ctx, defaultQueryTimeout)
+		defer cancel()
+	}
+
+	aggOpts := mongoOpts.Aggregate()
+	if qm.AllowDiskUse {
+		aggOpts.SetAllowDiskUse(true)
+	}
+	if qm.MaxTimeMS > 0 {
+		aggOpts.SetMaxTime(time.Duration(qm.MaxTimeMS) * time.Millisecond)
+	}
+
+	collection := mongoClient.Database(dbName).Collection(collectionName)
+
+	log.DefaultLogger.Info(
+		"Querying MongoDB",
+		"refId", query.RefID,
+		"database", dbName,
+		"collection", collectionName,
+	)
+	cursor, err := collection.Aggregate(queryCtx, pipeline, aggOpts)
 	if err != nil {
 		response.Error = errors.Wrap(err, "Failed to send query to mongo")
 		return response
 	}
+	defer func() {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer closeCancel()
+		_ = cursor.Close(closeCtx)
+	}()
 
 	buffered := bufferedCursor{
 		Cursor: cursor,
@@ -192,9 +180,15 @@ func (d *MongoDBDatasource) query(ctx context.Context, pCtx backend.PluginContex
 	var fields []field
 
 	if qm.SchemaInference {
+		inferenceDepth := qm.SchemaInferenceDepth
+		if inferenceDepth <= 0 {
+			inferenceDepth = defaultSchemaInferenceDepth
+		} else if inferenceDepth > maxSchemaInferenceDepth {
+			inferenceDepth = maxSchemaInferenceDepth
+		}
 		buffering := bufferingCursor{
 			Cursor: cursor,
-			buffer: make([]timestepDocument, 0, qm.SchemaInferenceDepth),
+			buffer: make([]timestepDocument, 0, inferenceDepth),
 		}
 
 		ignored := make(map[string]struct{}, 1+len(qm.LabelFields))
@@ -207,14 +201,14 @@ func (d *MongoDBDatasource) query(ctx context.Context, pCtx backend.PluginContex
 
 		state := NewSchemaInference(ignored)
 
-		doc, more, err := buffering.Next(ctx)
-		for len(buffering.buffer) < qm.SchemaInferenceDepth && more {
+		doc, more, err := buffering.Next(queryCtx)
+		for len(buffering.buffer) < inferenceDepth && more {
 			err = state.updateDoc(doc)
 			if err != nil {
 				break
 			}
 
-			doc, more, err = buffering.Next(ctx)
+			doc, more, err = buffering.Next(queryCtx)
 		}
 		if err != nil {
 			response.Error = errors.Wrap(err, "Schema Inference Failed")
@@ -223,10 +217,10 @@ func (d *MongoDBDatasource) query(ctx context.Context, pCtx backend.PluginContex
 		fields = state.finish()
 		log.DefaultLogger.Debug(
 			"Inferred schema",
-			"requestedDocs", qm.SchemaInferenceDepth,
+			"refId", query.RefID,
+			"requestedDocs", inferenceDepth,
 			"bufferedDocs", len(buffering.buffer),
 			"fields", fields,
-			"ignored", ignored,
 		)
 		buffered.buffer = buffering.buffer
 	} else {
@@ -243,56 +237,70 @@ func (d *MongoDBDatasource) query(ctx context.Context, pCtx backend.PluginContex
 		return response
 	}
 
-	log.DefaultLogger.Debug(
-		"Resolved query model",
-		"model", resolvedModel,
-	)
-
 	parser := resultParser{
 		frames: map[string]*data.Frame{},
 		model:  resolvedModel,
 	}
 
 	docCount := 0
-	doc, more, decodeErr, err := buffered.Next(ctx)
+	doc, more, decodeErr, err := buffered.Next(queryCtx)
 	for more {
-		err = parser.parseQueryResultDocument(doc)
-		if err != nil {
-			response.Error = fmt.Errorf("Failed to convert document number %d: %s, %v", docCount, err, doc)
+		if docCount >= maxDocumentsPerQuery {
+			response.Error = fmt.Errorf("query exceeded maximum safety limit of %d documents; please add a $limit stage or narrow your time range", maxDocumentsPerQuery)
 			return response
 		}
-		doc, more, decodeErr, err = buffered.Next(ctx)
+		err = parser.parseQueryResultDocument(doc)
+		if err != nil {
+			response.Error = fmt.Errorf("Failed to convert document number %d: %s", docCount, err)
+			return response
+		}
+		doc, more, decodeErr, err = buffered.Next(queryCtx)
 		docCount++
 	}
 	if err != nil {
 		if decodeErr {
 			response.Error = errors.Wrap(err, fmt.Sprintf("Failed to decode document number %d", docCount))
 			return response
-		} else {
-			response.Error = errors.Wrap(err, fmt.Sprintf("Failed to fetch result document number %d", docCount+1))
-			return response
 		}
-	}
-	log.DefaultLogger.Info(fmt.Sprintf("Processed %d documents", docCount))
-
-	// add the frames to the response.
-	response.Frames = make([]*data.Frame, 0, len(parser.frames))
-	for _, frame := range parser.frames {
-		response.Frames = append(response.Frames, frame)
+		response.Error = errors.Wrap(err, fmt.Sprintf("Failed to fetch result document number %d", docCount+1))
+		return response
 	}
 
-	log.DefaultLogger.Debug("query finished", "context", pCtx, "query", query, "response", response)
+	frameIDs := make([]string, 0, len(parser.frames))
+	for id := range parser.frames {
+		frameIDs = append(frameIDs, id)
+	}
+	sort.Strings(frameIDs)
+
+	response.Frames = make([]*data.Frame, 0, len(frameIDs))
+	for _, id := range frameIDs {
+		response.Frames = append(response.Frames, parser.frames[id])
+	}
+
+	log.DefaultLogger.Info(
+		"Query finished",
+		"refId", query.RefID,
+		"documents", docCount,
+		"frames", len(response.Frames),
+		"durationMs", time.Since(start).Milliseconds(),
+	)
 	return response
 }
 
 func (d *MongoDBDatasource) ping(ctx context.Context, req *backend.CheckHealthRequest) error {
-	mongoClient, err, internalErr := connect(ctx, req.PluginContext)
-	if internalErr != nil {
-		return errors.Wrap(err, "Failed to connect to mongo")
+	var settings *backend.DataSourceInstanceSettings
+	if req != nil {
+		settings = req.PluginContext.DataSourceInstanceSettings
 	}
+	mongoClient, cfg, err := d.getClient(ctx, settings)
 	if err != nil {
 		return err
 	}
-	defer mongoClient.Disconnect(ctx)
-	return mongoClient.Ping(ctx, nil)
+	timeout := time.Duration(defaultConnectTimeoutSeconds) * time.Second
+	if cfg != nil {
+		timeout = cfg.connectTimeout()
+	}
+	pingCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return mongoClient.Ping(pingCtx, nil)
 }

@@ -1,31 +1,45 @@
-name: Build Plugin
+name: Build & Release Plugin
 
 on:
   workflow_dispatch: {}
   push:
     tags:
-      - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
+      - 'v*'
+
 jobs:
-
-  build:
-
+  release:
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: write
     steps:
-    - uses: actions/checkout@v3
-    - name: Build
-      run: |
-        mkdir ./go
-        export GOPATH="${PWD}/go"
-        ./build-env.sh bash -c 'yarn install && yarn build && yarn backend && mage -v && yarn plugin && yarn sign'
-      env:
-        GRAFANA_API_KEY: ${{ secrets.GRAFANA_API_KEY }}
-    - name: Create Release
-      uses: "marvinpinto/action-automatic-releases@latest"
-      with:
-        repo_token: "${{ secrets.GITHUB_TOKEN }}"
-        automatic_release_tag: "${{ github.ref }}"
-        prerelease: true
-        title: "Testing"
-        files: |
-          meln5674-mongodb-community.zip
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache: true
+
+      - name: Install & Build Frontend
+        run: |
+          npm install --legacy-peer-deps --ignore-scripts
+          npm run typecheck
+          npm run build
+
+      - name: Test & Build Multi-Arch Backend Binaries
+        run: |
+          go vet ./pkg/...
+          go test -v -race ./pkg/...
+          GOOS=linux GOARCH=amd64 go build -o dist/gpx_mongodb-community_linux_amd64 ./pkg
+          GOOS=linux GOARCH=arm64 go build -o dist/gpx_mongodb-community_linux_arm64 ./pkg
+          GOOS=darwin GOARCH=amd64 go build -o dist/gpx_mongodb-community_darwin_amd64 ./pkg
+          GOOS=darwin GOARCH=arm64 go build -o dist/gpx_mongodb-community_darwin_arm64 ./pkg
+          GOOS=windows GOARCH=amd64 go build -o dist/gpx_mongodb-community_windows_amd64.exe ./pkg
+
+      - name: Package Plugin Zip
+        run: zip -r meln5674-mongodb-community.zip dist/ CHANGELOG.md LICENSE README.md

@@ -1,74 +1,130 @@
 import { lastValueFrom, Observable } from 'rxjs';
-import { 
-    DataSourceInstanceSettings,
-    DataQueryRequest, 
-    DataQueryResponse, 
-    MetricFindValue,
-    ScopedVars
+import {
+  DataSourceInstanceSettings,
+  DataQueryRequest,
+  DataQueryResponse,
+  MetricFindValue,
+  ScopedVars,
+  TimeRange,
 } from '@grafana/data';
 import {
-    DataSourceWithBackend, 
-    getTemplateSrv,
-    frameToMetricFindValue
+  DataSourceWithBackend,
+  getTemplateSrv,
+  frameToMetricFindValue,
+  TemplateSrv,
 } from '@grafana/runtime';
-import { MongoDBDataSourceOptions, MongoDBQuery, MongoDBQueryType, MongoDBVariableQuery } from './types';
+import {
+  defaultVariableQuery,
+  MongoDBDataSourceOptions,
+  MongoDBQuery,
+  MongoDBQueryType,
+  MongoDBVariableQuery,
+} from './types';
 
 export class DataSource extends DataSourceWithBackend<MongoDBQuery, MongoDBDataSourceOptions> {
+  readonly defaultDatabase: string;
+
   constructor(instanceSettings: DataSourceInstanceSettings<MongoDBDataSourceOptions>) {
     super(instanceSettings);
+    this.defaultDatabase = instanceSettings.jsonData?.defaultDatabase || '';
   }
 
- applyTemplateVariables(query: MongoDBQuery, scopedVars: ScopedVars): Record<string, any> {
-    const templateSrv = getTemplateSrv();
+  getDefaultQuery(): Partial<MongoDBQuery> {
     return {
-      ...query,
-      database: query.database ? templateSrv.replace(query.database, scopedVars) : '',
-      collection: query.collection ? templateSrv.replace(query.collection, scopedVars) : '',
-      aggregation: query.aggregation ? templateSrv.replace(query.aggregation, scopedVars, 'json') : ''
+      database: this.defaultDatabase || 'my_db',
     };
   }
 
+  applyTemplateVariables(query: MongoDBQuery, scopedVars: ScopedVars): MongoDBQuery {
+    const templateSrv = getTemplateSrv();
+    const rawDatabase = query.database || this.defaultDatabase || '';
 
-  query(request: DataQueryRequest<MongoDBQuery>): Observable<DataQueryResponse> {
-      const templateSrv = getTemplateSrv();
-      templateSrv.updateTimeRange(request.range);
-      return super.query(request);
+    return {
+      ...query,
+      database: rawDatabase ? templateSrv.replace(rawDatabase, scopedVars) : '',
+      collection: query.collection ? templateSrv.replace(query.collection, scopedVars) : '',
+      timestampField: query.timestampField ? templateSrv.replace(query.timestampField, scopedVars) : '',
+      timestampFormat: query.timestampFormat ? templateSrv.replace(query.timestampFormat, scopedVars) : '',
+      legendFormat: query.legendFormat ? templateSrv.replace(query.legendFormat, scopedVars) : '',
+      labelFields: Array.isArray(query.labelFields)
+        ? query.labelFields.map((field) => templateSrv.replace(field, scopedVars))
+        : [],
+      valueFields: Array.isArray(query.valueFields)
+        ? query.valueFields.map((field) => templateSrv.replace(field, scopedVars))
+        : [],
+      aggregation: query.aggregation ? templateSrv.replace(query.aggregation, scopedVars, 'json') : '',
+    };
   }
 
-  async metricFindQuery(query: MongoDBVariableQuery, options?: any): Promise<MetricFindValue[]> {
-    const target: Partial<MongoDBQuery> = {
-        refId: 'metricFindQuery',
-        database: query.database,
-        collection: query.collection,
-        queryType: MongoDBQueryType.Table,
-        timestampField: "",
-        timestampFormat: "",
-        labelFields: [],
-        valueFields: [ query.fieldName ],
-        valueFieldTypes: [ query.fieldType ],
-        aggregation: query.aggregation,
-        autoTimeBound: false,
-        autoTimeSort: false,
-        schemaInference: false,
-        schemaInferenceDepth: 0,
+  query(request: DataQueryRequest<MongoDBQuery>): Observable<DataQueryResponse> {
+    const templateSrv = getTemplateSrv() as TemplateSrv & {
+      updateTimeRange?: (timeRange: TimeRange) => void;
+    };
+    if (request.range && typeof templateSrv.updateTimeRange === 'function') {
+      templateSrv.updateTimeRange(request.range);
     }
+    return super.query(request);
+  }
 
-    let dataQuery = {
-        ...options,
-        targets: [target]
+  async metricFindQuery(
+    query: MongoDBVariableQuery,
+    options?: { scopedVars?: ScopedVars; range?: TimeRange }
+  ): Promise<MetricFindValue[]> {
+    const templateSrv = getTemplateSrv();
+    const scopedVars = options?.scopedVars || {};
+    const mergedQuery: MongoDBVariableQuery = {
+      database: query?.database ?? this.defaultDatabase ?? defaultVariableQuery.database ?? '',
+      collection: query?.collection ?? defaultVariableQuery.collection ?? '',
+      aggregation: query?.aggregation ?? defaultVariableQuery.aggregation ?? '[]',
+      fieldName: query?.fieldName ?? defaultVariableQuery.fieldName ?? '_id',
+      fieldType: query?.fieldType ?? defaultVariableQuery.fieldType ?? 'string',
+      allowDiskUse: query?.allowDiskUse ?? defaultVariableQuery.allowDiskUse ?? false,
+      maxTimeMS: query?.maxTimeMS ?? defaultVariableQuery.maxTimeMS ?? 0,
+    };
+
+    const resolvedFieldName = mergedQuery.fieldName
+      ? templateSrv.replace(mergedQuery.fieldName, scopedVars)
+      : '_id';
+
+    const target: MongoDBQuery = {
+      refId: 'metricFindQuery',
+      database: mergedQuery.database
+        ? templateSrv.replace(mergedQuery.database, scopedVars)
+        : this.defaultDatabase
+          ? templateSrv.replace(this.defaultDatabase, scopedVars)
+          : '',
+      collection: mergedQuery.collection ? templateSrv.replace(mergedQuery.collection, scopedVars) : '',
+      queryType: MongoDBQueryType.Table,
+      timestampField: '',
+      timestampFormat: '',
+      labelFields: [],
+      legendFormat: '',
+      valueFields: [resolvedFieldName],
+      valueFieldTypes: [mergedQuery.fieldType || 'string'],
+      aggregation: mergedQuery.aggregation
+        ? templateSrv.replace(mergedQuery.aggregation, scopedVars, 'json')
+        : '[]',
+      autoTimeBound: false,
+      autoTimeBoundAtStart: false,
+      autoTimeSort: false,
+      schemaInference: false,
+      schemaInferenceDepth: 0,
+      allowDiskUse: Boolean(mergedQuery.allowDiskUse),
+      maxTimeMS: mergedQuery.maxTimeMS || 0,
+    };
+
+    const dataQueryRequest = {
+      ...options,
+      targets: [target],
+    } as DataQueryRequest<MongoDBQuery>;
+
+    const rsp = await lastValueFrom(this.query(dataQueryRequest));
+    if (rsp.error) {
+      throw new Error(rsp.error.message);
     }
-    let dataQueryRequest = dataQuery as DataQueryRequest<MongoDBQuery>
-
-    return lastValueFrom(
-        this.query(dataQueryRequest)
-    ).then((rsp) => {
-        if (rsp.error) {
-            throw new Error(rsp.error.message);
-        }
-        if (rsp.data?.length) {
-          return frameToMetricFindValue(rsp.data[0]);
-        }
-        return [];
-    });
+    if (rsp.data?.length) {
+      return frameToMetricFindValue(rsp.data[0]);
+    }
+    return [];
   }
 }

@@ -1,14 +1,20 @@
-version: '3.0'
-
 services:
   grafana:
     container_name: 'meln5674-mongodb-community'
     build:
       context: ./.config
       args:
-        grafana_version: ${GRAFANA_VERSION:-9.3.8}
+        grafana_version: ${GRAFANA_VERSION:-11.5.2}
     ports:
       - 3000:3000/tcp
+    environment:
+      - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=meln5674-mongodb-community
     volumes:
       - ./dist:/var/lib/grafana/plugins/meln5674-mongodb-community
       - ./provisioning:/etc/grafana/provisioning
+
+  mongodb:
+    image: mongo:${MONGODB_VERSION:-8.0}
+    container_name: 'mongodb-community-db'
+    ports:
+      - 27017:27017/tcp

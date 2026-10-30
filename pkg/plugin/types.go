@@ -1,9 +1,11 @@
 package plugin
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"time"
@@ -14,9 +16,37 @@ import (
 	bsonPrim "go.mongodb.org/mongo-driver/bson/primitive"
 )
 
+const (
+	extJSONWrapperPrefix = `{"Value":`
+	extJSONWrapperSuffix = `}`
+)
+
+func marshalBSONArrayExtJSON(value interface{}) (json.RawMessage, error) {
+	rawBytes, err := bson.MarshalExtJSON(bson.D{{Key: "Value", Value: value}}, false, false)
+	if err != nil {
+		return nil, err
+	}
+	prefix := []byte(extJSONWrapperPrefix)
+	suffix := []byte(extJSONWrapperSuffix)
+	if len(rawBytes) >= len(prefix)+len(suffix) &&
+		bytes.HasPrefix(rawBytes, prefix) &&
+		bytes.HasSuffix(rawBytes, suffix) {
+		inner := bytes.TrimSuffix(bytes.TrimPrefix(rawBytes, prefix), suffix)
+		return json.RawMessage(bytes.TrimSpace(inner)), nil
+	}
+
+	var roundTrip struct {
+		Value json.RawMessage `json:"Value"`
+	}
+	if err := json.Unmarshal(rawBytes, &roundTrip); err != nil {
+		return nil, err
+	}
+	return roundTrip.Value, nil
+}
+
 func ToGrafanaValue(value interface{}) (interface{}, data.FieldType, error) {
 	// Only handles types explicitly referenced as being returned from bson.Unmarshal
-	// https://pkg.go.dev/go.mongodb.org/mongo-driver@v1.11.1/bson#hdr-Native_Go_Types
+	// https://pkg.go.dev/go.mongodb.org/mongo-driver/bson#hdr-Native_Go_Types
 	// notably, this does not deal with pointer types, like *float64
 
 	// 19
@@ -27,52 +57,26 @@ func ToGrafanaValue(value interface{}) (interface{}, data.FieldType, error) {
 	case int32, int64, float64, string, bool: // 1-5
 		return value, data.FieldTypeFor(value), nil
 	case bsonPrim.A, []interface{}: // 6
-		// []interface{} isn't documented, but can be observed to be returned
-		// MarshalExtJSON doesn't accept arrays for whatever reason
-		// https://github.com/mongodb/mongo-go-driver/blob/v1/docs/common-issues.md#writexxx-can-only-write-while-positioned-on-a-element-or-value-but-is-positioned-on-a-toplevel
-		bytes, err := bson.MarshalExtJSON(bsonPrim.M{"Value": value}, false, false)
+		rawJSON, err := marshalBSONArrayExtJSON(value)
 		if err != nil {
 			return nil, data.FieldTypeUnknown, err
 		}
-
-		/*
-			// This is the "safe" but slow way,
-			// We have to do this dance where we marshal it to JSON, unmarshall it back,
-			// extract the data we want, and then re-marshal just that
-			var roundTrip struct{ Value interface{} }
-			err = json.Unmarshal(bytes, &roundTrip)
-			if err != nil {
-				return nil, data.FieldTypeUnknown, err
-			}
-			bytes, err = json.Marshal(roundTrip.Value)
-			if err != nil {
-				return nil, data.FieldTypeUnknown, err
-			}
-		*/
-
-		// This is the fast but dangerous way.
-		// In theory, it should never produce anything except {"Value":list_goes_here},
-		// so this should never fail, and it passes the test, but this isn't guaranteed
-		bytes = bytes[len([]byte(`{"Value":`)):]
-		bytes = bytes[:len(bytes)-len([]byte("}"))]
-
-		return json.RawMessage(bytes), data.FieldTypeJSON, err
+		return rawJSON, data.FieldTypeJSON, nil
 	case bsonPrim.D, bsonPrim.M, map[string]interface{}: // 7
-		// map[string]interface{} isn't documented, but can be observed to be returned
-		bytes, err := bson.MarshalExtJSON(value, false, false)
+		rawBytes, err := bson.MarshalExtJSON(value, false, false)
 		if err != nil {
 			return nil, data.FieldTypeUnknown, err
 		}
-		return json.RawMessage(bytes), data.FieldTypeJSON, err
+		return json.RawMessage(rawBytes), data.FieldTypeJSON, nil
 	case bsonPrim.ObjectID: // 8
-		bytes := [12]byte(v)
-		return hex.EncodeToString(bytes[:]), data.FieldTypeString, nil
+		idBytes := [12]byte(v)
+		return hex.EncodeToString(idBytes[:]), data.FieldTypeString, nil
 	case bsonPrim.DateTime: // 9
 		return v.Time(), data.FieldTypeTime, nil
 	case bsonPrim.Binary: // 10
 		return hex.EncodeToString(v.Data), data.FieldTypeString, nil
 	case bsonPrim.Regex: // 11
-		return fmt.Sprintf("%s", v.Pattern), data.FieldTypeString, nil
+		return v.Pattern, data.FieldTypeString, nil
 	case bsonPrim.JavaScript: // 12
 		return string(v), data.FieldTypeString, nil
 	case bsonPrim.CodeWithScope: // 13
@@ -80,8 +84,20 @@ func ToGrafanaValue(value interface{}) (interface{}, data.FieldType, error) {
 	case bsonPrim.Timestamp: // 14
 		return time.Unix(int64(v.T), 0), data.FieldTypeTime, nil
 	case bsonPrim.Decimal128: // 15
+		if v.IsNaN() {
+			return nil, data.FieldTypeUnknown, fmt.Errorf("Decimal128 value is NaN")
+		}
+		if v.IsInf() != 0 {
+			return nil, data.FieldTypeUnknown, fmt.Errorf("Decimal128 value is Infinity")
+		}
 		f, err := strconv.ParseFloat(v.String(), 64)
-		return f, data.FieldTypeFloat64, err
+		if err != nil {
+			return nil, data.FieldTypeUnknown, err
+		}
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil, data.FieldTypeUnknown, fmt.Errorf("Decimal128 value %s overflows float64", v.String())
+		}
+		return f, data.FieldTypeFloat64, nil
 	case bsonPrim.MinKey, bsonPrim.MaxKey: // 16-17
 		return fmt.Sprintf("%#v", v), data.FieldTypeString, nil
 	case bsonPrim.Undefined: // 18

@@ -2,60 +2,124 @@ package plugin
 
 import (
 	"context"
+	"sync"
+	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
+	"github.com/pkg/errors"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
-// Make sure MongoDBDatasource implements required interfaces. This is important to do
-// since otherwise we will only get a not implemented error response from plugin in
-// runtime. In this example datasource instance implements backend.QueryDataHandler,
-// backend.CheckHealthHandler, backend.StreamHandler interfaces. Plugin should not
-// implement all these interfaces - only those which are required for a particular task.
-// For example if plugin does not need streaming functionality then you are free to remove
-// methods that implement backend.StreamHandler. Implementing instancemgmt.InstanceDisposer
-// is useful to clean up resources used by previous datasource instance when a new datasource
-// instance created upon datasource settings changed.
 var (
 	_ backend.QueryDataHandler      = (*MongoDBDatasource)(nil)
 	_ backend.CheckHealthHandler    = (*MongoDBDatasource)(nil)
 	_ instancemgmt.InstanceDisposer = (*MongoDBDatasource)(nil)
 )
 
-// NewMongoDBDatasource creates a new datasource instance.
-func NewMongoDBDatasource(_ backend.DataSourceInstanceSettings) (instancemgmt.Instance, error) {
-	return &MongoDBDatasource{}, nil
+// NewMongoDBDatasource creates a new datasource instance and pre-parses its settings.
+func NewMongoDBDatasource(_ context.Context, settings backend.DataSourceInstanceSettings) (instancemgmt.Instance, error) {
+	ds := &MongoDBDatasource{
+		settings: &settings,
+	}
+	if len(settings.JSONData) > 0 || len(settings.DecryptedSecureJSONData) > 0 {
+		cfg, err := parseDatasourceConfig(&settings)
+		if err != nil {
+			return nil, err
+		}
+		ds.config = &cfg
+	}
+	return ds, nil
 }
 
-// MongoDBDatasource is a datasource which can respond to data queries, reports
-// its health and has streaming skills.
+// MongoDBDatasource responds to data queries and health checks using a shared MongoDB connection pool.
 type MongoDBDatasource struct {
+	mu       sync.RWMutex
+	settings *backend.DataSourceInstanceSettings
+	config   *datasource
+	client   *mongo.Client
 }
 
-// Dispose here tells plugin SDK that plugin wants to clean up resources when a new instance
-// created. As soon as datasource settings change detected by SDK old datasource instance will
-// be disposed and a new one will be created using NewMongoDBDatasource factory function.
+func (d *MongoDBDatasource) getClient(ctx context.Context, fallbackSettings *backend.DataSourceInstanceSettings) (*mongo.Client, *datasource, error) {
+	d.mu.RLock()
+	if d.client != nil && d.config != nil {
+		client := d.client
+		cfg := d.config
+		d.mu.RUnlock()
+		return client, cfg, nil
+	}
+	d.mu.RUnlock()
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.client != nil && d.config != nil {
+		return d.client, d.config, nil
+	}
+
+	cfg := d.config
+	if cfg == nil {
+		activeSettings := d.settings
+		if activeSettings == nil || (len(activeSettings.JSONData) == 0 && len(activeSettings.DecryptedSecureJSONData) == 0 && fallbackSettings != nil) {
+			activeSettings = fallbackSettings
+		}
+		parsedCfg, err := parseDatasourceConfig(activeSettings)
+		if err != nil {
+			return nil, nil, err
+		}
+		cfg = &parsedCfg
+		d.config = cfg
+	}
+
+	opts, err := cfg.buildClientOptions()
+	if err != nil {
+		return nil, cfg, err
+	}
+
+	connectCtx, cancel := context.WithTimeout(context.Background(), cfg.connectTimeout())
+	defer cancel()
+
+	mongoClient, err := mongo.Connect(connectCtx, opts)
+	if err != nil {
+		return nil, cfg, errors.Wrap(err, "Error while connecting to MongoDB")
+	}
+
+	d.client = mongoClient
+	return d.client, d.config, nil
+}
+
+// Dispose cleans up the shared MongoDB client connection pool when the datasource instance is disposed.
 func (d *MongoDBDatasource) Dispose() {
-	// Clean up datasource instance resources.
+	d.mu.Lock()
+	client := d.client
+	d.client = nil
+	d.mu.Unlock()
+
+	if client != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := client.Disconnect(ctx); err != nil {
+			log.DefaultLogger.Warn("Failed to disconnect MongoDB client during dispose", "error", err)
+		}
+	}
 }
 
 // QueryData handles multiple queries and returns multiple responses.
-// req contains the queries []DataQuery (where each query contains RefID as a unique identifier).
-// The QueryDataResponse contains a map of RefID to the response for each query, and each response
-// contains Frames ([]*Frame).
 func (d *MongoDBDatasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
-	log.DefaultLogger.Info("QueryData called", "request", req)
+	numQueries := 0
+	if req != nil {
+		numQueries = len(req.Queries)
+	}
+	log.DefaultLogger.Debug("QueryData called", "numQueries", numQueries)
 
-	// create response struct
 	response := backend.NewQueryDataResponse()
+	if req == nil {
+		return response, nil
+	}
 
-	// loop over queries and execute them individually.
 	for _, q := range req.Queries {
 		res := d.query(ctx, req.PluginContext, q)
-
-		// save the response in a hashmap
-		// based on with RefID as identifier
 		response.Responses[q.RefID] = res
 	}
 
@@ -63,11 +127,8 @@ func (d *MongoDBDatasource) QueryData(ctx context.Context, req *backend.QueryDat
 }
 
 // CheckHealth handles health checks sent from Grafana to the plugin.
-// The main use case for these health checks is the test button on the
-// datasource configuration page which allows users to verify that
-// a datasource is working as expected.
 func (d *MongoDBDatasource) CheckHealth(ctx context.Context, req *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
-	log.DefaultLogger.Info("CheckHealth called", "request", req)
+	log.DefaultLogger.Debug("CheckHealth called")
 
 	err := d.ping(ctx, req)
 	if err != nil {

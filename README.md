@@ -1,117 +1,99 @@
-# Grafana Community MongoDB Plugin
+# Grafana MongoDB Community Plugin (v2.0)
 
-This Open Source Grafana plugin allows for querying a MongoDB database or cluster.
+Modernized, high-performance **MongoDB Datasource Plugin** for **Grafana 11.x and 12.x**, built with the official MongoDB Go Driver (`v1.17.x`) and full support for **MongoDB 6.0, 7.0, and 8.0** (including Time Series collections, Atlas `mongodb+srv://`, `SCRAM-SHA-256`, `MONGODB-X509` mTLS, and `MONGODB-AWS`).
 
-# This plugin is still in early development, and experimental. Everything is subject to change. Use at your own risk. Help Wanted.
+---
 
+## Key Features & Architecture (v2.0)
 
-## Installation
+- **Grafana 11.x & 12.x Ready:** Built on `@grafana/data`, `@grafana/runtime`, `@grafana/ui` `^11.5.0`, React 18, and `grafana-plugin-sdk-go` `v0.250.0`.
+- **MongoDB 7.x & 8.x Support:** Powered by `go.mongodb.org/mongo-driver` `v1.17.3` on Go 1.24.
+- **Persistent Connection Pooling:** Maintains a thread-safe, pooled `*mongo.Client` per datasource instance with automatic cleanup on `Dispose()`, eliminating per-query TCP/TLS/SCRAM handshake overhead.
+- **Modern Authentication & Security:**
+  - Explicit support for `SCRAM-SHA-256` (recommended for MongoDB 7/8), `SCRAM-SHA-1`, `MONGODB-X509` (mTLS), `MONGODB-AWS` (IAM), and `PLAIN` (LDAP SASL).
+  - Encrypted storage for `Username`, `Password`, `Client TLS Private Key`, and full `Encrypted Connection URI` (`connectionUriSecret`) via Grafana `secureJsonData`.
+  - TLS 1.2+ enforcement with custom CA bundle, SAN/ServerName override, and PKCS#1 / PKCS#8 / EC client certificates.
+- **Resource & OOM Protection:**
+  - Automatic server-side cursor cleanup (`defer cursor.Close`).
+  - Configurable `Allow Disk Use` (`allowDiskUse`) and server-side `Max Time (ms)` (`maxTimeMS`) per query.
+  - Per-query context timeout propagation and upper document safety cap (`100,000` documents per query).
+- **Enhanced Query & Variable Editor:**
+  - Real-time JSON syntax & stage validation with one-click **Format JSON**.
+  - Interactive field type selector (`float64`, `int64`, `int32`, `uint64`, `uint32`, `string`, `bool`, `time.Time`, `json.RawMessage`, plus nullable `*` variants).
+  - Deterministic alphabetical column ordering when **Infer Schema** is enabled.
+  - Template variable interpolation across `database`, `collection`, `timestampField`, `legendFormat`, `labelFields`, `valueFields`, and `aggregation`.
 
+---
 
-This plugin is not currently signed. To install it, you have two options: Sign it yourself, or whitelist it as an unsigned plugin.
+## Datasource Configuration
 
-### Signed
+1. Navigate to **Connections → Data sources → Add new data source** and select **mongodb-community**.
+2. Configure **MongoDB Connection**:
+   - **URL:** Standard `mongodb://host:27017` or DNS seed list `mongodb+srv://cluster.mongodb.net`.
+   - **Encrypted Connection URI (Optional):** If your URI embeds credentials or sensitive query parameters, store it here to keep it encrypted in Grafana's database.
+   - **Default Database:** Default database used when a panel or variable query leaves the database field blank.
+   - **Connection Timeout (s) & Max Pool Size:** Tune connection timeout (default `10s`) and pool size (default `50`).
+3. Configure **Authentication**:
+   - Choose `Auto / Driver Default`, `SCRAM-SHA-256`, `SCRAM-SHA-1`, `MONGODB-X509`, `MONGODB-AWS`, or `PLAIN`.
+   - Specify **Auth Source** (e.g., `admin` or `$external`) and encrypted **Username** / **Password**.
+4. Configure **TLS / mTLS Security** (if enabled):
+   - Provide **TLS CA Certificate**, **Expected Server Name**, and optional **Client TLS Certificate** + **Client TLS Private Key**.
 
-This is recommended for production environments.
+---
 
-To sign the plugin, build the plugin from source as described below, then execute
+## Querying MongoDB
 
-```bash
-export GRAFANA_API_KEY=<See https://grafana.com/docs/grafana/latest/developers/plugins/sign-a-plugin/#generate-an-api-key>
-yarn plugin
-yarn sign -- --rootUrls=<your grafana URL>
+### Timeseries Queries
+- **Database.Collection:** Target database (falls back to Default Database) and collection.
+- **Timestamp Field & Format:** Document field containing the BSON Date/Timestamp (or a string parsed using a Go `time.Parse` layout).
+- **Label Fields:** Document fields whose unique combinations split results into distinct time series frames.
+- **Automatic Time-Bound:** Injects a `$match` stage bounding the timestamp field to Grafana's active dashboard time range (`$__from` to `$__to`), either at the end of the pipeline or at the start (`Time-Bound at Start`) to leverage collection/timeseries indexes.
+- **Automatic Time-Sort:** Appends `{"$sort": {"<timestampField>": 1}}` to the pipeline.
+
+### Table Queries & Schema Inference
+- Choose **Table** as the Query Type to return arbitrary tabular columns.
+- Enable **Infer Schema** to automatically detect column types from the first *N* documents in deterministic alphabetical column order, or explicitly declare **Value Fields** and their types.
+
+### Template Variables
+You can use Grafana built-in and dashboard variables inside the aggregation pipeline:
+```json
+[
+  {
+    "$match": {
+      "timestamp": {
+        "$gte": { "$date": { "$numberLong": "$__from" } },
+        "$lte": { "$date": { "$numberLong": "$__to" } }
+      }
+    }
+  }
+]
 ```
 
-Then copy the produced `meln5674-mongodb-community.zip` file to your artifact repository (e.g. Nexus) or web server (.e.g Nginx) of choice, and note the URL to download the zip.
+---
 
-### Unsigned
+## Building from Source
 
-To install the plugin as unsigned, choose a version from the [Releases Page](https://github.com/meln5674/grafana-mongodb-community-plugin/releases), and either download the ZIP file, or copy its URL.
+### Prerequisites
+- **Go:** `>= 1.24`
+- **Node.js:** `>= 20`
 
-### Installation methods
-
-To view examples of installing the plugin see [this directory](./examples). All examples use the `${ZIP_URL}` variable to refer to either a URL from the releases page, or the URL your signed plugin is accessible from.
-
-### Development
-
-#### Building
-
-Tools Needed:
-* Node.js 14+
-* Golang 1.17+
-* Yarn
-* Mage
-
-If you have Docker, installed you can use `./build-env.sh` to build and run a shell in a container with all necessary tools (or `build-env.Dockerfile` to build it yourself manually). You can also execute `./build-env.sh <command>` to execute a single command, batch-style, in this container.
-
-To build, run
-
+### Build Commands
 ```bash
-yarn install
-yarn build
-yarn backend
+# Install frontend dependencies and build production bundle
+npm install --legacy-peer-deps --ignore-scripts
+npm run typecheck
+npm run build
+
+# Run backend unit tests and build plugin binaries
+go vet ./pkg/...
+go test -v -race ./pkg/...
+GOOS=linux GOARCH=amd64 go build -o dist/gpx_mongodb-community_linux_amd64 ./pkg
+GOOS=windows GOARCH=amd64 go build -o dist/gpx_mongodb-community_windows_amd64.exe ./pkg
 ```
 
-then to install into a development environment, copy built repository to `<grafana plugins dir>/meln5674-mongodb-community`
+---
 
-#### Integration Tests
+## License
 
-Tools Needed:
-* Docker
-* KinD
-* Helm
-* Kubectl
-
-```bash
-yarn integration-test
-```
-
-#### Live Development Environment
-
-```bash
-export KUBECONFIG=integration-test/kubeconfig
-export INTEGRATION_TEST_NO_CLEANUP=1
-export INTEGRATION_TEST_DEV_MODE=1
-yarn integration-test
-```
-
-Grafana credentials: admin/adminPassword
-
-MongoDD credentials: root/rootPassword
-
-MongoDB Test datasets:
-
-`test.weather { "metadata": { "sensorId": int, "type": string }, "timestamp": ISODate(...), "value": int }`
-
-Cleanup:
-
-```bash
-export INTEGRATION_TEST_NO_CLEANUP=
-export INTEGRATION_TEST_DEV_MODE=
-yarn integration-test
-```
-
-## Limitations
-
-* Only `aggregate` queries are supported, but you can emulate find() et al using various pipeline stages. Supporting find would likely require implementing a graphical query editor to prevent fragility.
-* Grafana's data system requires that all values in a column be the same type. As such, queries from this plugin expect that a field will have the same type in all returned documents.
-* Currently, you need to specify the types of each value field. This will hopefully be addressed in a later update to enable schema inference.
-* Grafana only allows label values to be strings. For performance, this plugin considers, for example, integer 0 and string "0" to be the same label.
-* Only anonymous and Username/Password authentication is supported.
-
-## Help Wanted
-
-Do you know about any of the following topics? If so, I'd love to hear from you!
-
-* React.js - Making the query editor UI not an eyesore
-* MongoDB - Providing representative sample data sets and queries to improve automated tests. Implementing other authentication types.
-* Grafana - Sample dashboards using the sample datasets
-* All three - Investigating implementing a graphical query builder.
-* Github - Implementing automated releases
-
-## Acknowledgements
-
-Thank you to the following individuals/groups
-
-* [James Osgood](https://github.com/JamesOsgood/) for writing the original plugin which inspired this one
-* [Nikolay Stankov](https://github.com/nstankov-bg/) for PRs [1](https://github.com/meln5674/grafana-mongodb-community-plugin/pull/1)
+Licensed under the [GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE).
+Originally created by [Andrew Melnick](https://github.com/meln5674/grafana-mongodb-community-plugin), modernized for Grafana 11/12 and MongoDB 7/8 by [Gustavo Martins](https://github.com/GustavoMS0).
